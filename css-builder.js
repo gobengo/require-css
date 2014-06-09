@@ -1,6 +1,7 @@
-define(['require', './normalize'], function(req, normalize) {
+define(['require', './normalize', './parse-module-path', './transform-css'],
+function(req, normalize, parseModulePath, getTransformedCss) {
   var cssAPI = {};
-  
+
   var isWindows = !!process.platform.match(/^win/);
 
   function compress(css) {
@@ -104,12 +105,39 @@ define(['require', './normalize'], function(req, normalize) {
   var config;
 
   var layerBuffer = [];
+
+  cssAPI.addToBuffer = function (str) {
+    layerBuffer.push(str);
+  };
+
+  cssAPI.clearBuffer = function () {
+    layerBuffer.length = 0;
+  };
+
+  cssAPI.getBuffer = function () {
+    return layerBuffer;
+  };
+
   var cssBuffer = {};
 
-  cssAPI.load = function(name, req, load, _config) {
+  // Load a file path on disk
+  function loadModuleAsync(toUrl, module, callback) {
+    var str = loadFile(toUrl(module));
+    callback(str);
+  }
 
+  var didClearFile = false;
+  cssAPI.load = function(name, req, load, _config) {
     //store config
     config = config || _config;
+    var cssConfig = config.css || {};
+
+    // The config.css.clearFileEachBuild option, if present
+    // indicates a file that should be emptied on each new build
+    // Otherwise the file will always be appended to
+    if (cssConfig.clearFileEachBuild && ! didClearFile && fs.existsSync(cssConfig.clearFileEachBuild)) {
+      saveFile(cssConfig.clearFileEachBuild, '');
+    }
 
     if (!siteRoot) {
       siteRoot = path.resolve(config.dir || path.dirname(config.out), config.siteRoot || '.') + '/';
@@ -121,34 +149,24 @@ define(['require', './normalize'], function(req, normalize) {
     if (name.match(absUrlRegEx))
       return load();
 
-    var fileUrl = req.toUrl(name + '.css');
-    var cssStr = normalize(loadFile(fileUrl), isWindows ? fileUrl.replace(/\\/g, '/') : fileUrl, siteRoot);
-
-    function transform(css) {
-      // The developer can add some transformFunctions to transform the css once read
-      var cssConfig = config.css || {};
-      var transforms = cssConfig.transformEach || [];
-      if (! (transforms instanceof Array)) {
-        transforms = [transforms];
-      }
-      transforms.forEach(function (transform) {
-        switch (typeof transform) {
-          case 'function':
-            css = transform(css);
-            break;
-          case 'string':
-            // must be a moduleId for module that exports function
-            var module = require.nodeRequire(require.toUrl(transform));
-            css = module(css);
-            break;
-        }
-      });
-      return css;
+    function nodeReq(depNames, callback) {
+      var depUrls = depNames.map(req.toUrl);
+      var deps = depUrls.map(require.nodeRequire);
+      callback.apply({}, deps);
     }
-
-    //add to the buffer
-    cssBuffer[name] = transform(cssStr);
-    load();
+    console.log('transforming css for', name);
+    getTransformedCss(
+      nodeReq,
+      loadModuleAsync.bind({}, req.toUrl),
+      getTransformedCss.getTransformEaches(config, 'node'),
+      name,
+      function withTransformedCss(cssStr) {
+        var parsed = parseModulePath(name);
+        var fileUrl = req.toUrl(parsed.cssId + '.css');
+        var normalizedCssStr = normalize(cssStr, isWindows ? fileUrl.replace(/\\/g, '/') : fileUrl, siteRoot);
+        cssBuffer[name] = normalizedCssStr;
+        load();
+      });
   };
   
   cssAPI.normalize = function(name, normalize) {
@@ -162,37 +180,50 @@ define(['require', './normalize'], function(req, normalize) {
     if (moduleName.match(absUrlRegEx))
       return;
 
-    layerBuffer.push(cssBuffer[moduleName]);
+    cssAPI.addToBuffer(cssBuffer[moduleName]);
     
     if (config.buildCSS != false)
     write.asModule(pluginName + '!' + moduleName, 'define(function(){})');
   }
   
   cssAPI.onLayerEnd = function(write, data) {
+    this.flushBuffer(config, write, data);
+  }
+
+  cssAPI.flushBuffer = function(config, write, data) {
+    var layerBuffer = cssAPI.getBuffer();
+
     if (config.separateCSS && config.IESelectorLimit)
       throw 'RequireCSS: separateCSS option is not compatible with ensuring the IE selector limit';
 
     if (config.separateCSS) {
       console.log('Writing CSS! file: ' + data.name + '\n');
+      var outPath;
 
-      fs.mkdirSync(data.name)
-      var outPath = config.dir ? path.resolve(config.dir, config.baseUrl, data.name + '.css') : config.out.replace(/(\.js)?$/, '.css');
+      if (config.dir) {
+        outPath = path.resolve(config.dir, config.baseUrl, data.name + '.css');
+      } else {
+        outPath = config.out.replace(/(\.js)?$/, '.css');
+      }
 
       var css = layerBuffer.join('');
-
-      if (fs.existsSync(outPath))
-        console.log('RequireCSS: Warning, separateCSS module path "' + outPath + '" already exists and is being replaced by the layer CSS.');
-
-      process.nextTick(function() {
-        saveFile(outPath, compress(css));  
-      });
+      var toWrite = compress(css);
+      if (fs.existsSync(outPath)) {
+        var existingCss = loadFile(outPath);
+        toWrite = existingCss +'\n' + toWrite;
+        console.log('RequireCSS: Warning, separateCSS module path "' + outPath + '" already exists and is being appended to by the layer CSS.');
+        saveFile(outPath, toWrite);  
+      } else {
+        saveFile(outPath, toWrite);
+      }
       
     }
-    else if (config.buildCSS != false) {
+    if (config.buildCSS != false) {
       var styles = config.IESelectorLimit ? layerBuffer : [layerBuffer.join('')];
       for (var i = 0; i < styles.length; i++) {
         if (styles[i] == '')
           return;
+        console.log('writing something');
         write(
           "(function(c){var d=document,a='appendChild',i='styleSheet',s=d.createElement('style');s.type='text/css';d.getElementsByTagName('head')[0][a](s);s[i]?s[i].cssText=c:s[a](d.createTextNode(c));})\n"
           + "('" + escape(compress(styles[i])) + "');\n"
@@ -200,7 +231,7 @@ define(['require', './normalize'], function(req, normalize) {
       }
     }    
     //clear layer buffer for next layer
-    layerBuffer = [];
+    cssAPI.clearBuffer();
   }
   
   return cssAPI;
