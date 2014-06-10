@@ -33,6 +33,9 @@ exports.fromCssStr = function (req, transformModuleNames, params, cssStr, callba
 exports.getTransformEaches = function getTransformEaches(config, key) {
     var cssConfig = config.css || {};
     var transformEaches = cssConfig.transformEach;
+    if ( ! transformEaches) {
+      return [];
+    }
     if ( ! (transformEaches instanceof Array)) {
       transformEaches = [transformEaches];
     }
