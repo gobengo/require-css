@@ -1,5 +1,9 @@
 define(['require', './normalize', './parse-module-path', './transform-css'],
 function(req, normalize, parseModulePath, getTransformedCss) {
+  if (! console) {
+    console = {};
+    console.log = function (){};
+  }
   var cssAPI = {};
 
   var isWindows = !!process.platform.match(/^win/);
