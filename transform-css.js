@@ -1,5 +1,10 @@
 var parseModuleName = require('./parse-module-path');
 
+if (! console) {
+    console = {};
+    console.log = function (){};
+}
+
 /**
  * Get the transformed CSS from a given CSS file URL
  */
